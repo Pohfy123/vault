@@ -7,7 +7,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/sts"
 	"github.com/hashicorp/errwrap"
 	cleanhttp "github.com/hashicorp/go-cleanhttp"
@@ -244,7 +243,7 @@ func (b *backend) clientEC2(ctx context.Context, s logical.Storage, region, acco
 }
 
 // clientIAM creates a client to interact with AWS IAM API
-func (b *backend) clientIAM(ctx context.Context, s logical.Storage, region, accountID string) (*iam.IAM, error) {
+func (b *backend) clientIAM(ctx context.Context, s logical.Storage, region, accountID string) (iamClient, error) {
 	stsRole, err := b.stsRoleForAccount(ctx, s, accountID)
 	if err != nil {
 		return nil, err
@@ -290,12 +289,12 @@ func (b *backend) clientIAM(ctx context.Context, s logical.Storage, region, acco
 	if err != nil {
 		return nil, err
 	}
-	client := iam.New(sess)
+	client := newIAMClient(sess)
 	if client == nil {
 		return nil, fmt.Errorf("could not obtain iam client")
 	}
 	if _, ok := b.IAMClientsMap[region]; !ok {
-		b.IAMClientsMap[region] = map[string]*iam.IAM{stsRole: client}
+		b.IAMClientsMap[region] = map[string]iamClient{stsRole: client}
 	} else {
 		b.IAMClientsMap[region][stsRole] = client
 	}

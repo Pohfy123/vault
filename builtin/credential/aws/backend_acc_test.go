@@ -6,28 +6,29 @@ package awsauth
 */
 
 import (
+	"bytes"
 	"context"
-	"fmt"
-	"os"
+	"io/ioutil"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/sts"
 	"github.com/hashicorp/go-hclog"
-
-	logicaltest "github.com/hashicorp/vault/helper/testhelpers/logical"
 	"github.com/hashicorp/vault/sdk/logical"
 )
 
 // This is directly based on our docs here:
 // https://www.vaultproject.io/docs/auth/aws
 func TestEC2LoginRenewDefaultSettings(t *testing.T) {
-	if os.Getenv(logicaltest.TestEnvVar) == "" {
-		t.Skip(fmt.Sprintf("Acceptance tests skipped unless env '%s' set", logicaltest.TestEnvVar))
-	}
 	testEnv, err := newTestEnvironment()
 	if err != nil {
 		t.Fatal(err)
@@ -73,24 +74,6 @@ func TestEC2LoginRenewDefaultSettings(t *testing.T) {
 			t.Fatalf("expected nil response but received %+v", resp)
 		}
 	}
-	{
-		// vault write auth/aws/config/client iam_server_id_header_value=vault.example.com
-		req := &logical.Request{
-			Operation: logical.CreateOperation,
-			Path:      "config/client",
-			Storage:   testEnv.conf.StorageView,
-			Data: map[string]interface{}{
-				"iam_server_id_header_value": "vault.example.com",
-			},
-		}
-		resp, err := testEnv.backend.HandleRequest(testEnv.ctx, req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if resp != nil {
-			t.Fatalf("expected nil response but received %+v", resp)
-		}
-	}
 	renewalReq := &logical.Request{}
 	{
 		// vault write auth/aws/login role=dev-role \
@@ -111,7 +94,7 @@ func TestEC2LoginRenewDefaultSettings(t *testing.T) {
 			t.Fatal(err)
 		}
 		if resp == nil {
-			t.Fatal("expected non-nil response but received")
+			t.Fatal("expected non-nil response")
 		}
 		if resp.Auth == nil {
 			t.Fatal("expected to receive auth")
@@ -134,17 +117,116 @@ func TestEC2LoginRenewDefaultSettings(t *testing.T) {
 	}
 }
 
+// This is directly based on our docs here:
+// https://www.vaultproject.io/docs/auth/aws
 func TestIAMLoginRenewDefaultSettings(t *testing.T) {
-	if os.Getenv(logicaltest.TestEnvVar) == "" {
-		t.Skip(fmt.Sprintf("Acceptance tests skipped unless env '%s' set", logicaltest.TestEnvVar))
+	testEnv, err := newTestEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	{
+		// vault write auth/aws/role/dev-role-iam auth_type=iam \
+		//		bound_iam_principal_arn=arn:aws:iam::241656615859:role/MyRole policies=prod,dev max_ttl=500h
+		req := &logical.Request{
+			Operation: logical.CreateOperation,
+			Path:      "role/dev-role-iam",
+			Storage:   testEnv.conf.StorageView,
+			Data: map[string]interface{}{
+				"auth_type":               "iam",
+				"bound_iam_principal_arn": "arn:aws:iam::241656615859:role/MyRole",
+				"policies":                []string{"prod", "dev"},
+				"max_ttl":                 "500h",
+			},
+		}
+		resp, err := testEnv.backend.HandleRequest(testEnv.ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp != nil {
+			t.Fatalf("expected nil response but received %+v", resp)
+		}
+	}
+	// We need a test server to respond to the GetCallerIdentity call.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+  <GetCallerIdentityResult>
+   <Arn>arn:aws:iam::241656615859:role/MyRole</Arn>
+    <UserId>AROADBQP57FF2AEXAMPLE</UserId>
+    <Account>123456789012</Account>
+  </GetCallerIdentityResult>
+  <ResponseMetadata>
+    <RequestId>01234567-89ab-cdef-0123-456789abcdef</RequestId>
+  </ResponseMetadata>
+</GetCallerIdentityResponse>`))
+	}))
+	defer ts.Close()
+	{
+		// vault write auth/aws/config/client iam_server_id_header_value=vault.example.com
+		req := &logical.Request{
+			Operation: logical.CreateOperation,
+			Path:      "config/client",
+			Storage:   testEnv.conf.StorageView,
+			Data: map[string]interface{}{
+				"iam_server_id_header_value": "vault.example.com",
+				"sts_endpoint":               ts.URL,
+			},
+		}
+		resp, err := testEnv.backend.HandleRequest(testEnv.ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp != nil {
+			t.Fatalf("expected nil response but received %+v", resp)
+		}
+	}
+	renewalReq := &logical.Request{}
+	{
+		// vault login -method=aws header_value=vault.example.com role=dev-role-iam
+		requestBody, err := GenerateLoginData(&credentials.Credentials{}, "vault.example.com", "us-east-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		requestBody["role"] = "dev-role-iam"
+		req := &logical.Request{
+			Operation: logical.UpdateOperation,
+			Path:      "login",
+			Storage:   testEnv.conf.StorageView,
+			Data:      requestBody,
+		}
+		resp, err := testEnv.backend.HandleRequest(testEnv.ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp == nil {
+			t.Fatal("expected non-nil response")
+		}
+		if resp.Auth == nil {
+			t.Fatal("expected to receive auth")
+		}
+		renewalReq.Auth = resp.Auth
+	}
+	{
+		// Test renewal.
+		renewalReq.Storage = testEnv.conf.StorageView
+		resp, err := testEnv.backend.pathLoginRenew(testEnv.ctx, renewalReq, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp == nil {
+			t.Fatal("expected non-nil response but received")
+		}
+		if resp.Auth == nil {
+			t.Fatal("expected to receive auth")
+		}
 	}
 }
 
 func newTestEnvironment() (*testEnvironment, error) {
-	fakeEC2 := &fakeEC2Client{}
-	mockEC2Client = fakeEC2
-	fakeSTS := &fakeSTSClient{}
-	mockSTSClient = fakeSTS
+	// Use our mocks for all clients so we can mimic valid AWS responses.
+	mockEC2Client = &fakeEC2Client{}
+	mockIAMClient = &fakeIAMClient{}
+	mockSTSClient = &fakeSTSClient{}
+
 	ctx := context.Background()
 	conf := &logical.BackendConfig{
 		StorageView: &logical.InmemStorage{},
@@ -163,8 +245,6 @@ func newTestEnvironment() (*testEnvironment, error) {
 		ctx:     ctx,
 		conf:    conf,
 		backend: b.(*backend),
-		fakeEC2: fakeEC2,
-		fakeSTS: fakeSTS,
 	}, nil
 }
 
@@ -172,8 +252,6 @@ type testEnvironment struct {
 	ctx     context.Context
 	conf    *logical.BackendConfig
 	backend *backend
-	fakeEC2 *fakeEC2Client
-	fakeSTS *fakeSTSClient
 }
 
 type fakeSTSClient struct{}
@@ -185,8 +263,21 @@ func (f *fakeSTSClient) GetCallerIdentity(*sts.GetCallerIdentityInput) (*sts.Get
 		UserId:  aws.String("5678"),
 	}, nil
 }
+
 func (f *fakeSTSClient) GetCallerIdentityRequest(*sts.GetCallerIdentityInput) (req *request.Request, output *sts.GetCallerIdentityOutput) {
-	return &request.Request{}, nil
+	return &request.Request{
+		HTTPRequest: &http.Request{
+			Method: "POST",
+			Header: map[string][]string{
+				"Authorization": {"SignedHeaders=" + strings.ToLower("X-Vault-AWS-IAM-Server-ID")},
+			},
+			Body: ioutil.NopCloser(bytes.NewReader([]byte("foo"))),
+			URL: &url.URL{
+				Scheme: "https://",
+				Host:   "www.foo.com",
+			},
+		},
+	}, nil
 }
 
 type fakeEC2Client struct{}
@@ -208,4 +299,23 @@ func (f *fakeEC2Client) DescribeInstances(*ec2.DescribeInstancesInput) (*ec2.Des
 			},
 		},
 	}, nil
+}
+
+type fakeIAMClient struct{}
+
+func (f *fakeIAMClient) GetInstanceProfile(*iam.GetInstanceProfileInput) (*iam.GetInstanceProfileOutput, error) {
+	return nil, nil
+}
+
+func (f *fakeIAMClient) GetRole(*iam.GetRoleInput) (*iam.GetRoleOutput, error) {
+	return &iam.GetRoleOutput{
+		Role: &iam.Role{
+			RoleId: aws.String("AROADBQP57FF2AEXAMPLE"),
+			Arn:    aws.String("arn:aws:iam::241656615859:role/MyRole"),
+		},
+	}, nil
+}
+
+func (f *fakeIAMClient) GetUser(*iam.GetUserInput) (*iam.GetUserOutput, error) {
+	return nil, nil
 }

@@ -62,7 +62,7 @@ type backend struct {
 	// This avoids the overhead of creating a client object for every login request.
 	// When the credentials are modified or deleted, all the cached client objects
 	// will be flushed. The empty STS role signifies the master account
-	IAMClientsMap map[string]map[string]*iam.IAM
+	IAMClientsMap map[string]map[string]iamClient
 
 	// Map to associate a partition to a random region in that partition. Users of
 	// this don't care what region in the partition they use, but there is some client
@@ -97,7 +97,7 @@ func Backend(_ *logical.BackendConfig) (*backend, error) {
 		// If there is a real need, this can be made configurable.
 		tidyCooldownPeriod:    time.Hour,
 		EC2ClientsMap:         make(map[string]map[string]ec2Client),
-		IAMClientsMap:         make(map[string]map[string]*iam.IAM),
+		IAMClientsMap:         make(map[string]map[string]iamClient),
 		iamUserIdToArnCache:   cache.New(7*24*time.Hour, 24*time.Hour),
 		tidyBlacklistCASGuard: new(uint32),
 		tidyWhitelistCASGuard: new(uint32),

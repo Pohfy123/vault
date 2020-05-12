@@ -131,7 +131,7 @@ needs to be supplied along with 'identity' parameter.`,
 
 // instanceIamRoleARN fetches the IAM role ARN associated with the given
 // instance profile name
-func (b *backend) instanceIamRoleARN(iamClient *iam.IAM, instanceProfileName string) (string, error) {
+func (b *backend) instanceIamRoleARN(iamClient iamClient, instanceProfileName string) (string, error) {
 	if iamClient == nil {
 		return "", fmt.Errorf("nil iamClient")
 	}
@@ -1037,7 +1037,7 @@ func (b *backend) pathLoginRenewIam(ctx context.Context, req *logical.Request, d
 		// 3: Full ARN matches one of the wildcard globs in roleEntry.BoundIamPrincipalARNs
 		clientUserId, err := getMetadataValue(req.Auth, "client_user_id")
 		switch {
-		case err != nil && strutil.StrListContains(roleEntry.BoundIamPrincipalIDs, clientUserId): // check 1 passed
+		case err == nil && strutil.StrListContains(roleEntry.BoundIamPrincipalIDs, clientUserId): // check 1 passed
 		case !roleEntry.ResolveAWSUniqueIDs && strutil.StrListContains(roleEntry.BoundIamPrincipalARNs, canonicalArn): // check 2 passed
 		default:
 			// check 3 is a bit more complex, so we do it last
